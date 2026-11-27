@@ -11766,8 +11766,14 @@ var require_follow_redirects = __commonJS({
     RedirectableRequest.prototype._sanitizeOptions = function(options) {
       if (!options.headers) {
         options.headers = {};
+      } else if (Array.isArray(options.headers)) {
+        var headerList = options.headers;
+        options.headers = {};
+        for (var i = 0; i < headerList.length; i += 2) {
+          options.headers[headerList[i]] = headerList[i + 1];
+        }
       }
-      if (!isArray(options.sensitiveHeaders)) {
+      if (!Array.isArray(options.sensitiveHeaders)) {
         options.sensitiveHeaders = [];
       }
       if (options.host) {
@@ -12024,9 +12030,6 @@ var require_follow_redirects = __commonJS({
       var dot = subdomain.length - domain.length - 1;
       return dot > 0 && subdomain[dot] === "." && subdomain.endsWith(domain);
     }
-    function isArray(value) {
-      return value instanceof Array;
-    }
     function isString(value) {
       return typeof value === "string" || value instanceof String;
     }
@@ -12040,7 +12043,7 @@ var require_follow_redirects = __commonJS({
       return URL2 && value instanceof URL2;
     }
     function escapeRegex(regex) {
-      return regex.replace(/[\]\\/()*+?.$]/g, "\\$&");
+      return regex.replace(/[\^$\\.*+?()[\]{}|]/g, "\\$&");
     }
     module2.exports = wrap({ http: http3, https: https3 });
     module2.exports.wrap = wrap;
@@ -19559,6 +19562,7 @@ var require_dispatcher = __commonJS({
 var require_dispatcher_base = __commonJS({
   "node_modules/undici/lib/dispatcher/dispatcher-base.js"(exports2, module2) {
     "use strict";
+    var buffer2 = require("node:buffer");
     var Dispatcher = require_dispatcher();
     var {
       ClientDestroyedError,
@@ -19570,6 +19574,7 @@ var require_dispatcher_base = __commonJS({
     var kOnClosed = Symbol("onClosed");
     var kInterceptedDispatch = Symbol("Intercepted Dispatch");
     var kWebSocketOptions = Symbol("webSocketOptions");
+    var kEventSourceOptions = Symbol("eventSourceOptions");
     var DispatcherBase = class extends Dispatcher {
       constructor(opts) {
         super();
@@ -19578,11 +19583,17 @@ var require_dispatcher_base = __commonJS({
         this[kClosed] = false;
         this[kOnClosed] = [];
         this[kWebSocketOptions] = opts?.webSocket ?? {};
+        this[kEventSourceOptions] = opts?.eventSource ?? {};
       }
       get webSocketOptions() {
         return {
           maxFragments: this[kWebSocketOptions].maxFragments ?? 131072,
           maxPayloadSize: this[kWebSocketOptions].maxPayloadSize ?? 128 * 1024 * 1024
+        };
+      }
+      get eventSourceOptions() {
+        return {
+          maxEventSize: this[kEventSourceOptions].maxEventSize ?? buffer2.kStringMaxLength
         };
       }
       get destroyed() {
@@ -23732,7 +23743,6 @@ var require_client_h1 = __commonJS({
       socket[kSocketUsed] = false;
       socket[kParser] = new Parser(client2, socket, llhttpInstance);
       addListener(socket, "error", function(err) {
-        assert(err.code !== "ERR_TLS_CERT_ALTNAME_INVALID");
         const parser = this[kParser];
         if (err.code === "ECONNRESET" && parser.statusCode && !parser.shouldKeepAlive) {
           const parserErr = parser.finish();
@@ -24416,7 +24426,6 @@ var require_client_h2 = __commonJS({
       client2[kHTTP2Session] = session;
       socket[kHTTP2Session] = session;
       util3.addListener(socket, "error", function(err) {
-        assert(err.code !== "ERR_TLS_CERT_ALTNAME_INVALID");
         this[kError] = err;
         this[kClient][kOnError](err);
       });
@@ -24475,7 +24484,6 @@ var require_client_h2 = __commonJS({
       }
     }
     function onHttp2SessionError(err) {
-      assert(err.code !== "ERR_TLS_CERT_ALTNAME_INVALID");
       this[kSocket][kError] = err;
       this[kClient][kOnError](err);
     }
@@ -25169,9 +25177,10 @@ var require_client = __commonJS({
         // h2
         maxConcurrentStreams,
         allowH2,
-        webSocket
+        webSocket,
+        eventSource
       } = {}) {
-        super({ webSocket });
+        super({ webSocket, eventSource });
         if (keepAlive !== void 0) {
           throw new InvalidArgumentError("unsupported keepAlive, use pipelining=0 instead");
         }
@@ -26068,7 +26077,7 @@ var require_agent2 = __commonJS({
       return opts && opts.connections === 1 ? new Client(origin, opts) : new Pool(origin, opts);
     }
     var Agent3 = class extends DispatcherBase {
-      constructor({ factory = defaultFactory, maxRedirections = 0, connect, ...options } = {}) {
+      constructor({ factory = defaultFactory, maxRedirections = 0, connect, tls, ...options } = {}) {
         if (typeof factory !== "function") {
           throw new InvalidArgumentError("factory must be a function.");
         }
@@ -26082,8 +26091,11 @@ var require_agent2 = __commonJS({
         if (connect && typeof connect !== "function") {
           connect = { ...connect };
         }
+        if (tls && typeof tls !== "function") {
+          tls = { ...tls };
+        }
         this[kInterceptors] = options.interceptors?.Agent && Array.isArray(options.interceptors.Agent) ? options.interceptors.Agent : [createRedirectInterceptor({ maxRedirections })];
-        this[kOptions] = { ...util3.deepClone(options), connect };
+        this[kOptions] = { ...util3.deepClone(options), connect, tls };
         this[kOptions].interceptors = options.interceptors ? { ...options.interceptors } : void 0;
         this[kMaxRedirections] = maxRedirections;
         this[kFactory] = factory;
@@ -31811,8 +31823,9 @@ var require_fetch = __commonJS({
         }
       );
       response.body = { stream: stream5, source: null, length: null };
-      fetchParams.controller.onAborted = onAborted;
-      fetchParams.controller.on("terminated", onAborted);
+      if (!fetchParams.controller.resume) {
+        fetchParams.controller.on("terminated", onAborted);
+      }
       fetchParams.controller.resume = async () => {
         while (true) {
           let bytes;
@@ -31912,7 +31925,6 @@ var require_fetch = __commonJS({
                 headersList.append(bufferToLowerCasedHeaderName(rawHeaders[i]), rawHeaders[i + 1].toString("latin1"), true);
               }
               location = headersList.get("location", true);
-              this.body = new Readable7({ read: resume });
               const decoders = [];
               const willFollow = location && request2.redirect === "follow" && redirectStatusSet.has(status);
               if (request2.method !== "HEAD" && request2.method !== "CONNECT" && !nullBodyStatus.includes(status) && !willFollow) {
@@ -31920,7 +31932,7 @@ var require_fetch = __commonJS({
                 const codings = contentEncoding ? contentEncoding.toLowerCase().split(",") : [];
                 const maxContentEncodings = 5;
                 if (codings.length > maxContentEncodings) {
-                  reject(new Error(`too many content-encodings in response: ${codings.length}, maximum allowed is ${maxContentEncodings}`));
+                  this.abort(new Error(`too many content-encodings in response: ${codings.length}, maximum allowed is ${maxContentEncodings}`));
                   return true;
                 }
                 for (let i = codings.length - 1; i >= 0; --i) {
@@ -31950,6 +31962,7 @@ var require_fetch = __commonJS({
                   }
                 }
               }
+              this.body = new Readable7({ read: resume });
               const onError = this.onError.bind(this);
               resolve2({
                 status,
@@ -31974,9 +31987,6 @@ var require_fetch = __commonJS({
             onComplete() {
               if (this.abort) {
                 fetchParams.controller.off("terminated", this.abort);
-              }
-              if (fetchParams.controller.onAborted) {
-                fetchParams.controller.off("terminated", fetchParams.controller.onAborted);
               }
               fetchParams.controller.ended = true;
               this.body.push(null);
@@ -35051,6 +35061,16 @@ var require_receiver = __commonJS({
             if (isControlFrame(this.#info.opcode)) {
               this.#loop = this.parseControlFrame(body2);
               this.#state = parserStates.INFO;
+              const socket = this.ws[kResponse].socket;
+              if (this.#loop && socket.writableNeedDrain) {
+                this.#loop = false;
+                socket.once("drain", () => {
+                  if (this.destroyed) return;
+                  this.#loop = true;
+                  this.run(callback);
+                });
+                return;
+              }
             } else {
               if (!this.#info.compressed) {
                 if (!this.writeFragments(body2)) {
@@ -35744,6 +35764,7 @@ var require_util8 = __commonJS({
 var require_eventsource_stream = __commonJS({
   "node_modules/undici/lib/web/eventsource/eventsource-stream.js"(exports2, module2) {
     "use strict";
+    var buffer2 = require("node:buffer");
     var { Transform: Transform3 } = require("node:stream");
     var { isASCIINumber, isValidLastEventId } = require_util8();
     var BOM = [239, 187, 191];
@@ -35751,24 +35772,28 @@ var require_eventsource_stream = __commonJS({
     var CR = 13;
     var COLON = 58;
     var SPACE = 32;
+    var defaultMaxEventSize = buffer2.kStringMaxLength;
     var DATA = Buffer.from("data");
     var EVENT = Buffer.from("event");
     var ID = Buffer.from("id");
     var RETRY = Buffer.from("retry");
-    function isASCIINumberBytes(buffer2, start) {
-      if (start >= buffer2.length) {
+    var minParserItems = 1024;
+    var maxParserItems = 131072;
+    var bytesPerParserItem = 128;
+    function isASCIINumberBytes(buffer3, start) {
+      if (start >= buffer3.length) {
         return false;
       }
-      for (let i = start; i < buffer2.length; i++) {
-        if (buffer2[i] < 48 || buffer2[i] > 57) {
+      for (let i = start; i < buffer3.length; i++) {
+        if (buffer3[i] < 48 || buffer3[i] > 57) {
           return false;
         }
       }
       return true;
     }
-    function isValidLastEventIdBytes(buffer2, start) {
-      for (let i = start; i < buffer2.length; i++) {
-        if (buffer2[i] === 0) {
+    function isValidLastEventIdBytes(buffer3, start) {
+      for (let i = start; i < buffer3.length; i++) {
+        if (buffer3[i] === 0) {
           return false;
         }
       }
@@ -35784,6 +35809,11 @@ var require_eventsource_stream = __commonJS({
         }
       }
       return true;
+    }
+    function createMaxEventSizeExceededError() {
+      const error2 = new Error("EventSource message size exceeded");
+      error2.aborted = false;
+      return error2;
     }
     var EventSourceStream = class extends Transform3 {
       /**
@@ -35811,6 +35841,13 @@ var require_eventsource_stream = __commonJS({
       pos = 0;
       lineChunkIndex = 0;
       linePos = 0;
+      lineLength = 0;
+      eventSize = 0;
+      eventFieldSizes = { data: 0, event: 0, id: 0, retry: 0 };
+      dataLineCount = 0;
+      maxEventSize;
+      maxDataLines;
+      maxBufferedChunks;
       event = {
         data: void 0,
         event: void 0,
@@ -35819,6 +35856,7 @@ var require_eventsource_stream = __commonJS({
       };
       /**
        * @param {object} options
+       * @param {number} [options.maxEventSize]
        * @param {eventSourceSettings} options.eventSourceSettings
        * @param {Function} [options.push]
        */
@@ -35826,6 +35864,10 @@ var require_eventsource_stream = __commonJS({
         options.readableObjectMode = true;
         super(options);
         this.state = options.eventSourceSettings || {};
+        this.maxEventSize = options.maxEventSize ?? defaultMaxEventSize;
+        const parserItemLimit = this.maxEventSize > 0 ? Math.min(maxParserItems, Math.max(minParserItems, Math.floor(this.maxEventSize / bytesPerParserItem))) : 0;
+        this.maxDataLines = parserItemLimit;
+        this.maxBufferedChunks = parserItemLimit;
         if (options.push) {
           this.push = options.push;
         }
@@ -35839,6 +35881,10 @@ var require_eventsource_stream = __commonJS({
       _transform(chunk, _encoding, callback) {
         if (chunk.length === 0) {
           callback();
+          return;
+        }
+        if (this.maxEventSize > 0 && this.chunks.length >= this.maxBufferedChunks && chunk[0] !== LF && chunk[0] !== CR) {
+          callback(createMaxEventSizeExceededError());
           return;
         }
         this.chunks.push(chunk);
@@ -35877,18 +35923,32 @@ var require_eventsource_stream = __commonJS({
             if (byte === CR) {
               this.crlfCheck = true;
             }
-            this.parseLine(this.readLine(), this.event);
+            try {
+              this.parseLine(this.readLine(), this.event);
+            } catch (error2) {
+              callback(error2);
+              return;
+            }
             this.consumeCurrentByte();
             this.eventEndCheck = true;
             continue;
+          }
+          if (this.maxEventSize > 0 && ++this.lineLength > this.maxEventSize + 7) {
+            callback(createMaxEventSizeExceededError());
+            return;
           }
           this.advanceCursor();
         }
         callback();
       }
+      _destroy(error2, callback) {
+        this.chunks.length = 0;
+        this.clearEvent();
+        super._destroy(error2, callback);
+      }
       /**
        * @param {Buffer} line
-       * @param {EventStreamEvent} event
+       * @param {EventSourceStreamEvent} event
        */
       parseLine(line, event) {
         if (line.length === 0) {
@@ -35908,6 +35968,12 @@ var require_eventsource_stream = __commonJS({
           }
         }
         if (isFieldName(line, fieldLength, DATA)) {
+          if (this.maxEventSize > 0 && this.dataLineCount >= this.maxDataLines) {
+            throw createMaxEventSizeExceededError();
+          }
+          const valueBytes = line.length - valueStart;
+          const dataSize = this.eventFieldSizes.data + (event.data === void 0 ? 0 : 1) + valueBytes;
+          this.setEventFieldSize("data", dataSize);
           const value = line.toString("utf8", valueStart);
           if (event.data === void 0) {
             event.data = value;
@@ -35915,26 +35981,37 @@ var require_eventsource_stream = __commonJS({
             event.data += `
 ${value}`;
           }
+          this.dataLineCount++;
           return;
         }
         if (isFieldName(line, fieldLength, RETRY)) {
           if (isASCIINumberBytes(line, valueStart)) {
+            this.setEventFieldSize("retry", line.length - valueStart);
             event.retry = line.toString("utf8", valueStart);
           }
           return;
         }
         if (isFieldName(line, fieldLength, ID)) {
           if (isValidLastEventIdBytes(line, valueStart)) {
+            this.setEventFieldSize("id", line.length - valueStart);
             event.id = line.toString("utf8", valueStart);
           }
           return;
         }
         if (isFieldName(line, fieldLength, EVENT)) {
-          const value = line.toString("utf8", valueStart);
-          if (value.length > 0) {
-            event.event = value;
+          if (valueStart < line.length) {
+            this.setEventFieldSize("event", line.length - valueStart);
+            event.event = line.toString("utf8", valueStart);
           }
         }
+      }
+      setEventFieldSize(field, size) {
+        const eventSize = this.eventSize - this.eventFieldSizes[field] + size;
+        if (this.maxEventSize > 0 && eventSize > this.maxEventSize) {
+          throw createMaxEventSizeExceededError();
+        }
+        this.eventSize = eventSize;
+        this.eventFieldSizes[field] = size;
       }
       /**
        * @param {EventSourceStreamEvent} event
@@ -35962,6 +36039,12 @@ ${value}`;
         this.event.event = void 0;
         this.event.id = void 0;
         this.event.retry = void 0;
+        this.eventSize = 0;
+        this.dataLineCount = 0;
+        this.eventFieldSizes.data = 0;
+        this.eventFieldSizes.event = 0;
+        this.eventFieldSizes.id = 0;
+        this.eventFieldSizes.retry = 0;
       }
       hasPendingEvent() {
         return this.event.data !== void 0 || this.event.event !== void 0 || this.event.id !== void 0 || this.event.retry !== void 0;
@@ -35986,13 +36069,15 @@ ${value}`;
       syncLineStartToCursor() {
         this.lineChunkIndex = this.chunkIndex;
         this.linePos = this.pos;
+        this.lineLength = 0;
         this.dropConsumedChunks();
       }
       dropConsumedChunks() {
-        while (this.lineChunkIndex > 0) {
-          this.chunks.shift();
-          this.lineChunkIndex--;
-          this.chunkIndex--;
+        if (this.lineChunkIndex > 0) {
+          const consumed = this.lineChunkIndex;
+          this.chunks.splice(0, consumed);
+          this.lineChunkIndex = 0;
+          this.chunkIndex -= consumed;
         }
         if (this.chunkIndex === this.chunks.length) {
           this.chunks.length = 0;
@@ -36095,6 +36180,7 @@ var require_eventsource = __commonJS({
     var { delay: delay4 } = require_util8();
     var { kEnumerableProperty } = require_util();
     var { environmentSettingsObject } = require_util2();
+    var { getGlobalDispatcher } = require_global2();
     var experimentalWarned = false;
     var defaultReconnectionTime = 3e3;
     var CONNECTING = 0;
@@ -36235,6 +36321,7 @@ var require_eventsource = __commonJS({
           this.#state.origin = response.urlList[response.urlList.length - 1].origin;
           const eventSourceStream = new EventSourceStream({
             eventSourceSettings: this.#state,
+            maxEventSize: this.#dispatcher.eventSourceOptions?.maxEventSize,
             push: (event) => {
               this.dispatchEvent(createFastMessageEvent(
                 event.type,
@@ -36367,7 +36454,8 @@ var require_eventsource = __commonJS({
       {
         key: "dispatcher",
         // undici only
-        converter: webidl.converters.any
+        converter: webidl.converters.any,
+        defaultValue: () => getGlobalDispatcher()
       }
     ]);
     module2.exports = {
@@ -46500,7 +46588,7 @@ var require_package = __commonJS({
   "node_modules/@actions/artifact/package.json"(exports2, module2) {
     module2.exports = {
       name: "@actions/artifact",
-      version: "6.2.1",
+      version: "6.3.1",
       preview: true,
       description: "Actions artifact lib",
       keywords: [
@@ -46547,26 +46635,27 @@ var require_package = __commonJS({
         url: "https://github.com/actions/toolkit/issues"
       },
       dependencies: {
-        "@actions/core": "^3.0.0",
-        "@actions/github": "^9.0.0",
-        "@actions/http-client": "^4.0.0",
-        "@azure/storage-blob": "^12.30.0",
+        "@actions/core": "^3.0.1",
+        "@actions/github": "^9.1.1",
+        "@actions/http-client": "^4.0.1",
+        "@azure/storage-blob": "^12.31.0",
         "@octokit/core": "^7.0.6",
         "@octokit/plugin-request-log": "^6.0.0",
-        "@octokit/plugin-retry": "^8.0.0",
-        "@octokit/request": "^10.0.7",
+        "@octokit/plugin-retry": "^8.1.0",
+        "@octokit/request": "^10.0.8",
         "@octokit/request-error": "^7.1.0",
-        "@protobuf-ts/plugin": "^2.2.3-alpha.1",
-        "@protobuf-ts/runtime": "^2.9.4",
+        "@protobuf-ts/runtime": "^2.11.1",
+        "@protobuf-ts/runtime-rpc": "^2.11.1",
         archiver: "^7.0.1",
         "jwt-decode": "^4.0.0",
         "unzip-stream": "^0.3.1"
       },
       devDependencies: {
+        "@protobuf-ts/plugin": "^2.11.1",
         "@types/archiver": "^7.0.0",
         "@types/unzip-stream": "^0.3.4",
-        typedoc: "^0.28.16",
-        "typedoc-plugin-markdown": "^4.9.0",
+        typedoc: "^0.28.19",
+        "typedoc-plugin-markdown": "^4.11.0",
         typescript: "^5.9.3"
       },
       overrides: {
@@ -46838,8 +46927,9 @@ var init_artifact_twirp_client2 = __esm({
     ArtifactHttpClient = class {
       constructor(userAgent2, maxAttempts, baseRetryIntervalMilliseconds, retryMultiplier) {
         this.maxAttempts = 5;
-        this.baseRetryIntervalMilliseconds = 3e3;
+        this.baseRetryIntervalMilliseconds = 8e3;
         this.retryMultiplier = 1.5;
+        this.retryTimeoutMilliseconds = 12e4;
         const token = getRuntimeToken();
         this.baseUrl = getResultsServiceUrl();
         if (maxAttempts) {
@@ -46879,11 +46969,16 @@ var init_artifact_twirp_client2 = __esm({
           let attempt = 0;
           let errorMessage = "";
           let rawBody = "";
+          let totalRetryWaitMilliseconds = 0;
           while (attempt < this.maxAttempts) {
             let isRetryable = false;
+            let retryAfterSeconds;
             try {
               const response = yield operation();
               const statusCode = response.message.statusCode;
+              if (statusCode === HttpCodes.TooManyRequests) {
+                retryAfterSeconds = this.getRetryAfterSeconds(response);
+              }
               rawBody = yield response.readBody();
               debug(`[Response] - ${response.message.statusCode}`);
               debug(`Headers: ${JSON.stringify(response.message.headers, null, 2)}`);
@@ -46920,9 +47015,13 @@ var init_artifact_twirp_client2 = __esm({
             if (attempt + 1 === this.maxAttempts) {
               throw new Error(`Failed to make request after ${this.maxAttempts} attempts: ${errorMessage}`);
             }
-            const retryTimeMilliseconds = this.getExponentialRetryTimeMilliseconds(attempt);
+            const retryTimeMilliseconds = retryAfterSeconds !== void 0 ? retryAfterSeconds * 1e3 : this.getExponentialRetryTimeMilliseconds(attempt);
+            if (totalRetryWaitMilliseconds + retryTimeMilliseconds > this.retryTimeoutMilliseconds) {
+              throw new Error(`Retry wait of ${retryTimeMilliseconds} ms would exceed the maximum total retry wait of ${this.retryTimeoutMilliseconds} ms: ${errorMessage}`);
+            }
             info(`Attempt ${attempt + 1} of ${this.maxAttempts} failed with error: ${errorMessage}. Retrying request in ${retryTimeMilliseconds} ms...`);
             yield this.sleep(retryTimeMilliseconds);
+            totalRetryWaitMilliseconds += retryTimeMilliseconds;
             attempt++;
           }
           throw new Error(`Request failed`);
@@ -46944,6 +47043,17 @@ var init_artifact_twirp_client2 = __esm({
           HttpCodes.TooManyRequests
         ];
         return retryableStatusCodes.includes(statusCode);
+      }
+      // Only positive integer seconds are supported, not HTTP-date values.
+      getRetryAfterSeconds(response) {
+        var _a2;
+        const header = response.message.headers["retry-after"];
+        const value = (_a2 = Array.isArray(header) ? header[0] : header) === null || _a2 === void 0 ? void 0 : _a2.trim();
+        if (value === void 0 || !/^\d+$/.test(value)) {
+          return void 0;
+        }
+        const parsed = parseInt(value, 10);
+        return !isNaN(parsed) && parsed > 0 ? parsed : void 0;
       }
       sleep(milliseconds) {
         return __awaiter4(this, void 0, void 0, function* () {
@@ -54016,7 +54126,7 @@ function scanAttributeTokens(attrStr) {
     while (i < len && isWhiteSpace(attrStr[i])) i++;
     if (i >= len) break;
     if (attrStr[i] === "=") {
-      i = tokenStart + 1;
+      i++;
       continue;
     }
     const leadingWs = attrStr.slice(tokenStart, i);
@@ -55461,7 +55571,9 @@ function toNumber(str, options = {}) {
   } else if (options.octal && octRegex.test(trimmedStr)) {
     return parse_int(trimmedStr, 8);
   } else if (!isFinite(trimmedStr)) {
-    return handleInfinity(str, Number(trimmedStr), options);
+    const num = Number(trimmedStr);
+    if (Number.isNaN(num)) return str;
+    return handleInfinity(str, num, options);
   } else if (trimmedStr.includes("e") || trimmedStr.includes("E")) {
     return resolveEnotation(str, trimmedStr, options);
   } else {
@@ -55472,8 +55584,8 @@ function toNumber(str, options = {}) {
       let numTrimmedByZeros = trimZeros(match2[3]);
       const decimalAdjacentToLeadingZeros = sign ? (
         // 0., -00., 000.
-        str[leadingZeros.length + 1] === "."
-      ) : str[leadingZeros.length] === ".";
+        trimmedStr[leadingZeros.length + 1] === "."
+      ) : trimmedStr[leadingZeros.length] === ".";
       if (!options.leadingZeros && (leadingZeros.length > 1 || leadingZeros.length === 1 && !decimalAdjacentToLeadingZeros)) {
         return str;
       } else {
@@ -55510,14 +55622,13 @@ function resolveEnotation(str, trimmedStr, options) {
     const leadingZeros = notation[2];
     const eAdjacentToLeadingZeros = sign ? (
       // 0E.
-      str[leadingZeros.length + 1] === eChar
-    ) : str[leadingZeros.length] === eChar;
+      trimmedStr[leadingZeros.length + 1] === eChar
+    ) : trimmedStr[leadingZeros.length] === eChar;
     if (leadingZeros.length > 1 && eAdjacentToLeadingZeros) return str;
     else if (leadingZeros.length === 1 && (notation[3].startsWith(`.${eChar}`) || notation[3][0] === eChar)) {
       return Number(trimmedStr);
     } else if (leadingZeros.length > 0) {
       if (options.leadingZeros && !eAdjacentToLeadingZeros) {
-        trimmedStr = (notation[1] || "") + notation[3];
         return Number(trimmedStr);
       } else return str;
     } else {
@@ -57176,6 +57287,30 @@ var init_sql_strict = __esm({
   }
 });
 
+// node_modules/is-unsafe/src/util/decode-entities.js
+function decodeEntities(input) {
+  if (input.indexOf("&") === -1) return input;
+  return input.replace(ENTITY_RE, (match2, hex, dec, name) => {
+    if (name !== void 0) {
+      return Object.prototype.hasOwnProperty.call(NAMED, name) ? NAMED[name] : match2;
+    }
+    const cp = hex !== void 0 ? parseInt(hex, 16) : parseInt(dec, 10);
+    if (!Number.isFinite(cp) || cp > 1114111) return match2;
+    return String.fromCodePoint(cp);
+  });
+}
+var NAMED, ENTITY_RE;
+var init_decode_entities = __esm({
+  "node_modules/is-unsafe/src/util/decode-entities.js"() {
+    NAMED = Object.freeze({
+      colon: ":",
+      Tab: "	",
+      NewLine: "\n"
+    });
+    ENTITY_RE = /&(?:#[xX]0*([0-9a-fA-F]{1,6});?|#0*([0-9]{1,7});?|([a-zA-Z][a-zA-Z0-9]{1,15});)/g;
+  }
+});
+
 // node_modules/is-unsafe/src/index.js
 function assertString(value) {
   if (typeof value !== "string") {
@@ -57210,10 +57345,16 @@ function normalise(context5) {
   if (Array.isArray(context5[0])) return { lists: context5, regex: null };
   return { lists: [context5], regex: null };
 }
+function decodedCopy(value, list) {
+  if (!list.decodeEntities) return null;
+  const decoded = decodeEntities(value);
+  return decoded === value ? null : decoded;
+}
 function matchList(value, list) {
   const label = list.label ?? "CUSTOM";
+  const decoded = decodedCopy(value, list);
   for (const rule of list) {
-    if (rule.pattern.test(value)) {
+    if (rule.pattern.test(value) || decoded !== null && rule.pattern.test(decoded)) {
       return { context: label, id: rule.id, description: rule.description, pattern: rule.pattern };
     }
   }
@@ -57235,6 +57376,7 @@ var init_src4 = __esm({
     init_html();
     init_xml();
     init_sql_strict();
+    init_decode_entities();
     init_html();
     init_xml();
     init_svg();
@@ -57246,6 +57388,9 @@ var init_src4 = __esm({
     html_default.label = "HTML";
     xml_default.label = "XML";
     svg_default.label = "SVG";
+    html_default.decodeEntities = true;
+    xml_default.decodeEntities = true;
+    svg_default.decodeEntities = true;
     sql_default.label = "SQL";
     sql_strict_default.label = "SQL-STRICT";
     shell_default.label = "SHELL";
@@ -57333,6 +57478,9 @@ function resolveNameSpace(tagname) {
   }
   return tagname;
 }
+function attrValue(match2) {
+  return match2[3] !== void 0 ? match2[3] : match2[4];
+}
 function buildAttributesMap(attrStr, jPath, tagName, force = false) {
   const options = this.options;
   if (force === true || options.ignoreAttributes !== true && typeof attrStr === "string") {
@@ -57344,7 +57492,7 @@ function buildAttributesMap(attrStr, jPath, tagName, force = false) {
     const rawAttrsForMatcher = {};
     for (let i = 0; i < len; i++) {
       const attrName = this.resolveNameSpace(matches[i][1]);
-      const oldVal = matches[i][4];
+      const oldVal = attrValue(matches[i]);
       if (attrName.length && oldVal !== void 0) {
         let val = oldVal;
         if (options.trimValues) val = val.trim();
@@ -57368,7 +57516,7 @@ function buildAttributesMap(attrStr, jPath, tagName, force = false) {
           aName = options.transformAttributeName(aName);
         }
         aName = sanitizeName(aName, options);
-        if (matches[i][4] !== void 0) {
+        if (attrValue(matches[i]) !== void 0) {
           const oldVal = processedVals[i];
           const newVal = options.attributeValueProcessor(attrName, oldVal, jPathStr);
           if (newVal === null || newVal === void 0) {
@@ -57393,6 +57541,16 @@ function buildAttributesMap(attrStr, jPath, tagName, force = false) {
     }
     return attrs;
   }
+}
+function getOriginalIndex(index2, crlfPositions) {
+  let low = 0;
+  let high = crlfPositions.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (crlfPositions[middle] < index2) low = middle + 1;
+    else high = middle;
+  }
+  return index2 + low;
 }
 function addChild(currentNode, childNode, matcher, startIndex) {
   if (!this.options.captureMetaData) startIndex = void 0;
@@ -57448,7 +57606,6 @@ function isItStopNode() {
   return this.matcher.matchesAny(this.stopNodeExpressionsSet);
 }
 function tagExpWithClosingIndex(xmlData, i, closingChar = ">") {
-  let attrBoundary = 0;
   const len = xmlData.length;
   const closeCode0 = closingChar.charCodeAt(0);
   const closeCode1 = closingChar.length > 1 ? closingChar.charCodeAt(1) : -1;
@@ -57456,10 +57613,9 @@ function tagExpWithClosingIndex(xmlData, i, closingChar = ">") {
   let segmentStart = i;
   for (let index2 = i; index2 < len; index2++) {
     const code = xmlData.charCodeAt(index2);
-    if (attrBoundary) {
-      if (code === attrBoundary) attrBoundary = 0;
-    } else if (code === 34 || code === 39) {
-      attrBoundary = code;
+    if (code === 34 || code === 39) {
+      index2 = xmlData.indexOf(xmlData[index2], index2 + 1);
+      if (index2 === -1) return;
     } else if (code === closeCode0) {
       if (closeCode1 !== -1) {
         if (xmlData.charCodeAt(index2 + 1) === closeCode1) {
@@ -57470,7 +57626,7 @@ function tagExpWithClosingIndex(xmlData, i, closingChar = ">") {
         result += xmlData.substring(segmentStart, index2);
         return { data: result, index: index2 };
       }
-    } else if (code === 9 && !attrBoundary) {
+    } else if (code === 9) {
       result += xmlData.substring(segmentStart, index2) + " ";
       segmentStart = index2 + 1;
     }
@@ -57520,6 +57676,8 @@ function readTagExp(xmlData, i, removeNSPrefix, closingChar = ">") {
 function readStopNodeData(xmlData, tagName, i) {
   const startIndex = i;
   let openTagCount = 1;
+  let lenient = false;
+  let nextGt = -1;
   const xmllen = xmlData.length;
   for (; i < xmllen; i++) {
     if (xmlData[i] === "<") {
@@ -57547,13 +57705,27 @@ function readStopNodeData(xmlData, tagName, i) {
         const closeIndex = findClosingIndex(xmlData, "]]>", i, "StopNode is not closed.") - 2;
         i = closeIndex;
       } else {
-        const tagData = readTagExp(xmlData, i, false);
+        const tagData = lenient ? void 0 : readTagExp(xmlData, i, false);
         if (tagData) {
-          const openTagName = tagData && tagData.tagName;
+          const openTagName = tagData.tagName;
           if (openTagName === tagName && tagData.tagExp[tagData.tagExp.length - 1] !== "/") {
             openTagCount++;
           }
           i = tagData.closeIndex;
+        } else {
+          lenient = true;
+          if (nextGt < i) {
+            nextGt = xmlData.indexOf(">", i);
+            if (nextGt === -1) return;
+          }
+          const nextLt = xmlData.indexOf("<", i + 1);
+          if (nextLt === -1 || nextLt > nextGt) {
+            const exp = xmlData.substring(i + 1, nextGt);
+            const sep4 = exp.search(/\s/);
+            const name = sep4 === -1 ? exp : exp.substring(0, sep4);
+            if (name === tagName && exp[exp.length - 1] !== "/") openTagCount++;
+            i = nextGt;
+          }
         }
       }
     }
@@ -57663,9 +57835,16 @@ var init_OrderedObjParser = __esm({
         }
       }
     };
-    attrsRegx = new RegExp(`([^\\s=]+)\\s*(=\\s*(['"])([\\s\\S]*?)\\3)?`, "gm");
+    attrsRegx = /([^\s=]+)\s*(=\s*(?:"([^"]*)"|'([^']*)'))?/gm;
     parseXml = function(xmlData) {
-      xmlData = xmlData.replace(/\r\n?/g, "\n");
+      const options = this.options;
+      const crlfPositions = options.captureMetaData ? [] : void 0;
+      xmlData = xmlData.replace(/\r\n?/g, options.captureMetaData ? (newline, index2) => {
+        if (newline.length === 2) {
+          crlfPositions.push(index2 - crlfPositions.length);
+        }
+        return "\n";
+      } : "\n");
       const xmlObj = new XmlNode("!xml");
       let currentNode = xmlObj;
       let textData = "";
@@ -57674,7 +57853,6 @@ var init_OrderedObjParser = __esm({
       this.entityExpansionCount = 0;
       this.currentExpandedLength = 0;
       this.doctypefound = false;
-      const options = this.options;
       const docTypeReader = new DocTypeReader(options.processEntities);
       const xmlLen = xmlData.length;
       for (let i = 0; i < xmlLen; i++) {
@@ -57706,7 +57884,7 @@ var init_OrderedObjParser = __esm({
             this.isCurrentNodeStopNode = false;
             currentNode = this.tagsNodeStack.pop() || xmlObj;
             if (options.captureMetaData && currentNode) {
-              currentNode.addEndIndex(closeIndex + 1);
+              currentNode.addEndIndex(getOriginalIndex(closeIndex + 1, crlfPositions));
             }
             textData = "";
             i = closeIndex;
@@ -57727,9 +57905,10 @@ var init_OrderedObjParser = __esm({
               if (tagData.tagName !== tagData.tagExp && tagData.attrExpPresent && options.ignoreAttributes !== true) {
                 childNode[":@"] = attsMap;
               }
-              this.addChild(currentNode, childNode, this.readonlyMatcher, i);
+              const startIndex = options.captureMetaData ? getOriginalIndex(i, crlfPositions) : i;
+              this.addChild(currentNode, childNode, this.readonlyMatcher, startIndex);
               if (options.captureMetaData) {
-                currentNode.addEndIndex(tagData.closeIndex + 2);
+                currentNode.addEndIndex(getOriginalIndex(tagData.closeIndex + 2, crlfPositions));
               }
             }
             i = tagData.closeIndex + 1;
@@ -57811,7 +57990,7 @@ var init_OrderedObjParser = __esm({
             if (tagName !== xmlObj.tagname) {
               this.isCurrentNodeStopNode = this.isItStopNode();
             }
-            const startIndex = i;
+            const startIndex = options.captureMetaData ? getOriginalIndex(i, crlfPositions) : i;
             if (this.isCurrentNodeStopNode) {
               let tagContent = "";
               if (isSelfClosing) {
@@ -57833,7 +58012,7 @@ var init_OrderedObjParser = __esm({
               this.isCurrentNodeStopNode = false;
               this.addChild(currentNode, childNode, this.readonlyMatcher, startIndex);
               if (options.captureMetaData) {
-                currentNode.addEndIndex(i + 1);
+                currentNode.addEndIndex(getOriginalIndex(i + 1, crlfPositions));
               }
             } else {
               if (isSelfClosing) {
@@ -57844,7 +58023,7 @@ var init_OrderedObjParser = __esm({
                 }
                 this.addChild(currentNode, childNode, this.readonlyMatcher, startIndex);
                 if (options.captureMetaData) {
-                  currentNode.addEndIndex(closeIndex + 1);
+                  currentNode.addEndIndex(getOriginalIndex(closeIndex + 1, crlfPositions));
                 }
                 this.matcher.pop();
                 this.isCurrentNodeStopNode = false;
@@ -57855,7 +58034,7 @@ var init_OrderedObjParser = __esm({
                 }
                 this.addChild(currentNode, childNode, this.readonlyMatcher, startIndex);
                 if (options.captureMetaData) {
-                  currentNode.addEndIndex(result.closeIndex + 1);
+                  currentNode.addEndIndex(getOriginalIndex(result.closeIndex + 1, crlfPositions));
                 }
                 this.matcher.pop();
                 this.isCurrentNodeStopNode = false;
@@ -58092,6 +58271,17 @@ function safeCdata(val) {
 function escapeAttribute(val) {
   return valToStr(val).replace(/"/g, "&quot;").replace(/'/g, "&apos;");
 }
+function resolveName(name, isAttribute2, options, matcher, validator) {
+  if (!options.sanitizeName) return name;
+  const isPI = !isAttribute2 && name[0] === "?";
+  const bare = isPI ? name.slice(1) : name;
+  if (validator(bare)) return name;
+  const result = options.sanitizeName(bare, { isAttribute: isAttribute2, matcher: matcher.readOnly() });
+  if (typeof result !== "string" || !validator(result)) {
+    throw new Error(`sanitizeName returned an invalid XML name for "${bare}"`);
+  }
+  return isPI ? "?" + result : result;
+}
 var init_util4 = __esm({
   "node_modules/fast-xml-builder/src/util.js"() {
   }
@@ -58110,11 +58300,6 @@ function detectXmlVersionFromArray(jArray, options) {
     }
   }
   return "1.0";
-}
-function resolveTagName(name, isAttribute2, options, matcher, qNameValidator) {
-  if (!options.sanitizeName) return name;
-  if (qNameValidator(name)) return name;
-  return options.sanitizeName(name, { isAttribute: isAttribute2, matcher: matcher.readOnly() });
 }
 function toXml(jArray, options) {
   let indentation = "";
@@ -58155,8 +58340,8 @@ function arrToStr(arr, options, indentation, matcher, stopNodeExpressions, qName
     const tagObj = arr[i];
     const rawTagName = propName2(tagObj);
     if (rawTagName === void 0) continue;
-    const isSpecialName = rawTagName === options.textNodeName || rawTagName === options.cdataPropName || rawTagName === options.commentPropName || rawTagName[0] === "?";
-    const tagName = isSpecialName ? rawTagName : resolveTagName(rawTagName, false, options, matcher, qNameValidator);
+    const isSpecialName = rawTagName === options.textNodeName || rawTagName === options.cdataPropName || rawTagName === options.commentPropName;
+    const tagName = isSpecialName ? rawTagName : resolveName(rawTagName, false, options, matcher, qNameValidator);
     const attrValues = extractAttributeValues(tagObj[":@"], options);
     matcher.push(tagName, attrValues);
     const isStopNode = checkStopNode(matcher, stopNodeExpressions);
@@ -58207,7 +58392,7 @@ function arrToStr(arr, options, indentation, matcher, stopNodeExpressions, qName
     const tagStart = indentation + `<${tagName}${attStr}`;
     let tagValue;
     if (isStopNode) {
-      tagValue = getRawContent2(tagObj[rawTagName], options);
+      tagValue = getRawContent2(tagObj[rawTagName], options, matcher.getDepth());
     } else {
       tagValue = arrToStr(tagObj[rawTagName], options, newIdentation, matcher, stopNodeExpressions, qNameValidator);
     }
@@ -58244,7 +58429,10 @@ function extractAttributeValues(attrMap, options) {
   }
   return hasAttrs ? attrValues : null;
 }
-function getRawContent2(arr, options) {
+function getRawContent2(arr, options, depth = 0) {
+  if (options.maxNestedTags && depth > options.maxNestedTags) {
+    throw new Error("Maximum nested tags exceeded");
+  }
   if (!Array.isArray(arr)) {
     if (arr !== void 0 && arr !== null) {
       return valToStr(arr);
@@ -58265,7 +58453,7 @@ function getRawContent2(arr, options) {
       continue;
     } else if (tagName) {
       const attStr = attr_to_str_raw(item[":@"], options);
-      const nestedContent = getRawContent2(item[tagName], options);
+      const nestedContent = getRawContent2(item[tagName], options, depth + 1);
       if (!nestedContent || nestedContent.length === 0) {
         content += `<${tagName}${attStr}/>`;
       } else {
@@ -58304,7 +58492,7 @@ function attr_to_str(attrMap, options, isStopNode, matcher, qNameValidator) {
     for (let attr in attrMap) {
       if (!Object.prototype.hasOwnProperty.call(attrMap, attr)) continue;
       const cleanAttrName = attr.substr(options.attributeNamePrefix.length);
-      const resolvedAttrName = isStopNode ? cleanAttrName : resolveTagName(cleanAttrName, true, options, matcher, qNameValidator);
+      const resolvedAttrName = isStopNode ? cleanAttrName : resolveName(cleanAttrName, true, options, matcher, qNameValidator);
       let attrVal;
       if (isStopNode) {
         attrVal = attrMap[attr];
@@ -58429,17 +58617,12 @@ function detectXmlVersionFromObj(jObj, options) {
   }
   return "1.0";
 }
-function resolveTagName2(name, isAttribute2, options, matcher, qNameValidator) {
-  if (!options.sanitizeName) return name;
-  if (qNameValidator(name)) return name;
-  return options.sanitizeName(name, { isAttribute: isAttribute2, matcher: matcher.readOnly() });
-}
 function processTextOrObjNode(object, key, level, matcher, qNameValidator) {
   const attrValues = this.extractAttributes(object);
   matcher.push(key, attrValues);
   const isStopNode = this.checkStopNode(matcher);
   if (isStopNode) {
-    const rawContent2 = this.buildRawContent(object);
+    const rawContent2 = this.buildRawContent(object, matcher.getDepth());
     const attrStr = this.buildAttributesForStopNode(object);
     matcher.pop();
     return this.buildObjectNode(rawContent2, key, attrStr, level);
@@ -58540,8 +58723,8 @@ var init_fxb = __esm({
       const isCurrentStopNode = this.checkStopNode(matcher);
       for (let key in jObj) {
         if (!Object.prototype.hasOwnProperty.call(jObj, key)) continue;
-        const isSpecialKey = key === this.options.textNodeName || key === this.options.cdataPropName || key === this.options.commentPropName || this.options.attributesGroupName && key === this.options.attributesGroupName || this.isAttribute(key) || key[0] === "?";
-        const resolvedKey = isSpecialKey ? key : resolveTagName2(key, false, this.options, matcher, qNameValidator);
+        const isSpecialKey = key === this.options.textNodeName || key === this.options.cdataPropName || key === this.options.commentPropName || this.options.attributesGroupName && key === this.options.attributesGroupName || this.isAttribute(key);
+        const resolvedKey = isSpecialKey ? key : resolveName(key, false, this.options, matcher, qNameValidator);
         if (typeof jObj[key] === "undefined") {
           if (this.isAttribute(key)) {
             val += "";
@@ -58561,7 +58744,7 @@ var init_fxb = __esm({
         } else if (typeof jObj[key] !== "object") {
           const attr = this.isAttribute(key);
           if (attr && !this.ignoreAttributesFn(attr, jPath)) {
-            const resolvedAttr = resolveTagName2(attr, true, this.options, matcher, qNameValidator);
+            const resolvedAttr = resolveName(attr, true, this.options, matcher, qNameValidator);
             attrStr += this.buildAttrPairStr(resolvedAttr, valToStr(jObj[key]), isCurrentStopNode);
           } else if (!attr) {
             if (key === this.options.textNodeName) {
@@ -58637,7 +58820,7 @@ var init_fxb = __esm({
             const Ks = Object.keys(jObj[key]);
             const L = Ks.length;
             for (let j = 0; j < L; j++) {
-              const resolvedAttr = resolveTagName2(Ks[j], true, this.options, matcher, qNameValidator);
+              const resolvedAttr = resolveName(Ks[j], true, this.options, matcher, qNameValidator);
               attrStr += this.buildAttrPairStr(resolvedAttr, valToStr(jObj[key][Ks[j]]), isCurrentStopNode);
             }
           } else {
@@ -58680,7 +58863,10 @@ var init_fxb = __esm({
       }
       return hasAttrs ? attrValues : null;
     };
-    Builder.prototype.buildRawContent = function(obj) {
+    Builder.prototype.buildRawContent = function(obj, depth = 0) {
+      if (this.options.maxNestedTags && depth >= this.options.maxNestedTags) {
+        throw new Error("Maximum nested tags exceeded");
+      }
       if (typeof obj === "string") {
         return obj;
       }
@@ -58703,7 +58889,7 @@ var init_fxb = __esm({
             if (typeof item === "string" || typeof item === "number") {
               content += `<${key}>${item}</${key}>`;
             } else if (typeof item === "object" && item !== null) {
-              const nestedContent = this.buildRawContent(item);
+              const nestedContent = this.buildRawContent(item, depth + 1);
               const nestedAttrs = this.buildAttributesForStopNode(item);
               if (nestedContent === "") {
                 content += `<${key}${nestedAttrs}/>`;
@@ -58713,7 +58899,7 @@ var init_fxb = __esm({
             }
           }
         } else if (typeof value === "object" && value !== null) {
-          const nestedContent = this.buildRawContent(value);
+          const nestedContent = this.buildRawContent(value, depth + 1);
           const nestedAttrs = this.buildAttributesForStopNode(value);
           if (nestedContent === "") {
             content += `<${key}${nestedAttrs}/>`;
